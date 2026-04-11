@@ -1,6 +1,6 @@
 fastapi==0.95.2
 uvicorn==0.34.2
-scikit-learn==1.6.1
-numpy==2.2.4
+scikit-learn==1.4.2
+numpy==1.26.4
 httpx==0.28.1
 pydantic==1.10.13
