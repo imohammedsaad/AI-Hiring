@@ -5,6 +5,9 @@ FastAPI backend for intelligent resume-to-job-description matching.
 Uses a hybrid approach: semantic embeddings (60%) + skill matching (40%).
 
 Designed to be consumed by Salesforce APEX via HTTP callouts.
+
+Optimized for Render.com free tier — uses lightweight dependencies only.
+No PyTorch / sentence-transformers required.
 """
 
 from fastapi import FastAPI, HTTPException
@@ -12,10 +15,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer
+import numpy as np
+import httpx
+import os
 import logging
 import time
-import os
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -30,7 +34,7 @@ app = FastAPI(
     title="Resume-Job Matcher API",
     description="Hybrid NLP engine for resume screening — keyword, TF-IDF, "
                 "semantic embeddings, and skill-gap analysis.",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 # CORS — wide-open for dev; lock down origins in production
@@ -43,11 +47,65 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Load the sentence-transformer model at startup (one-time cost)
+# HuggingFace Inference API config (free, no model download needed)
 # ---------------------------------------------------------------------------
-logger.info("Loading SentenceTransformer model (all-MiniLM-L6-v2) …")
-model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-logger.info("Model loaded ✓")
+HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
+HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+
+# Reusable async HTTP client — created once, reused across requests
+http_client: httpx.AsyncClient | None = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Create the shared HTTP client on startup (lightweight, instant)."""
+    global http_client
+    http_client = httpx.AsyncClient(timeout=30.0)
+    logger.info("App started ✓ — no heavy model to load!")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up the HTTP client."""
+    global http_client
+    if http_client:
+        await http_client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Embedding helper — calls HuggingFace free Inference API
+# ---------------------------------------------------------------------------
+async def get_embeddings(texts: list[str]) -> list[list[float]]:
+    """
+    Get sentence embeddings from HuggingFace Inference API (free tier).
+    Falls back to TF-IDF if the API is unavailable.
+    """
+    headers = {}
+    if HF_API_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
+
+    payload = {
+        "inputs": texts,
+        "options": {"wait_for_model": True},
+    }
+
+    try:
+        resp = await http_client.post(HF_API_URL, json=payload, headers=headers)
+        resp.raise_for_status()
+        embeddings = resp.json()
+
+        # The API returns a list of embeddings (list of lists of floats)
+        if isinstance(embeddings, list) and len(embeddings) == len(texts):
+            return embeddings
+
+        logger.warning(f"Unexpected HF API response shape, falling back to TF-IDF")
+        return []
+
+    except Exception as e:
+        logger.warning(f"HF Inference API call failed ({e}), falling back to TF-IDF")
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Skill bank — extend this as needed
@@ -123,16 +181,19 @@ def tfidf_score(resume: str, job: str) -> float:
         return 0.0
 
 
-def embedding_score(resume: str, job: str) -> float:
-    """Phase 4 — semantic similarity via sentence embeddings."""
-    try:
-        emb1 = model.encode(resume)
-        emb2 = model.encode(job)
-        similarity = cosine_similarity([emb1], [emb2])
-        return float(similarity[0][0])
-    except Exception:
-        logger.warning("Embedding computation failed, returning 0")
-        return 0.0
+async def embedding_score(resume: str, job: str) -> float:
+    """Phase 4 — semantic similarity via HuggingFace API embeddings."""
+    embeddings = await get_embeddings([resume, job])
+
+    if embeddings and len(embeddings) == 2:
+        emb1 = np.array(embeddings[0])
+        emb2 = np.array(embeddings[1])
+        sim = cosine_similarity([emb1], [emb2])
+        return float(sim[0][0])
+
+    # Fallback: use TF-IDF score as approximation for semantic score
+    logger.info("Using TF-IDF as fallback for semantic score")
+    return tfidf_score(resume, job)
 
 # ---------------------------------------------------------------------------
 # Skill extraction & analysis
@@ -166,7 +227,7 @@ def home():
 
 
 @app.post("/predict", response_model=MatchResponse, tags=["Matching"])
-def predict(data: InputData):
+async def predict(data: InputData):
     """
     Main matching endpoint.
 
@@ -180,7 +241,7 @@ def predict(data: InputData):
 
     try:
         # --- Core scores ---
-        semantic = embedding_score(data.resume, data.job)
+        semantic = await embedding_score(data.resume, data.job)
         s_score, matched, missing = skill_analysis(data.resume, data.job)
 
         # --- Supplementary scores ---
@@ -222,5 +283,4 @@ def predict(data: InputData):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
