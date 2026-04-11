@@ -6,20 +6,21 @@ Uses a hybrid approach: semantic embeddings (60%) + skill matching (40%).
 
 Designed to be consumed by Salesforce APEX via HTTP callouts.
 
-Optimized for Render.com free tier — uses lightweight dependencies only.
-No PyTorch / sentence-transformers required.
+Optimized for Render.com free tier — zero heavy ML dependencies.
+No PyTorch, no sentence-transformers, no scikit-learn.
 """
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import httpx
 import os
+import re
+import math
 import logging
 import time
+from collections import Counter
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -34,7 +35,7 @@ app = FastAPI(
     title="Resume-Job Matcher API",
     description="Hybrid NLP engine for resume screening — keyword, TF-IDF, "
                 "semantic embeddings, and skill-gap analysis.",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 # CORS — wide-open for dev; lock down origins in production
@@ -71,6 +72,67 @@ async def shutdown_event():
     global http_client
     if http_client:
         await http_client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python / NumPy math utilities (replaces scikit-learn)
+# ---------------------------------------------------------------------------
+
+def cosine_sim(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
+    """Cosine similarity between two vectors using NumPy."""
+    dot = np.dot(vec_a, vec_b)
+    norm_a = np.linalg.norm(vec_a)
+    norm_b = np.linalg.norm(vec_b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(dot / (norm_a * norm_b))
+
+
+def tokenize(text: str) -> list[str]:
+    """Simple word tokenizer — lowercase, alphanumeric tokens only."""
+    return re.findall(r"[a-z0-9]+(?:[.+#][a-z0-9]+)*", text.lower())
+
+
+def manual_tfidf_vectors(doc1: str, doc2: str) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Hand-rolled TF-IDF vectorizer (no scikit-learn).
+
+    TF  = term count in doc / total terms in doc
+    IDF = log(N / df)  where N = 2 (two documents), df = docs containing term
+    """
+    tokens1 = tokenize(doc1)
+    tokens2 = tokenize(doc2)
+
+    if not tokens1 or not tokens2:
+        return np.array([0.0]), np.array([0.0])
+
+    # Build vocabulary from both documents
+    vocab = sorted(set(tokens1) | set(tokens2))
+    word_to_idx = {w: i for i, w in enumerate(vocab)}
+    vocab_size = len(vocab)
+
+    # Term frequencies
+    tf1 = Counter(tokens1)
+    tf2 = Counter(tokens2)
+    len1 = len(tokens1)
+    len2 = len(tokens2)
+
+    # Document frequency (how many of the 2 docs contain the term)
+    num_docs = 2
+    df = {}
+    for w in vocab:
+        df[w] = (1 if w in tf1 else 0) + (1 if w in tf2 else 0)
+
+    # Build TF-IDF vectors
+    vec1 = np.zeros(vocab_size)
+    vec2 = np.zeros(vocab_size)
+
+    for w, idx in word_to_idx.items():
+        idf = math.log(num_docs / df[w]) + 1  # smoothed IDF (add 1 like sklearn)
+        vec1[idx] = (tf1.get(w, 0) / len1) * idf
+        vec2[idx] = (tf2.get(w, 0) / len2) * idf
+
+    return vec1, vec2
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +232,10 @@ def keyword_score(resume: str, job: str) -> float:
 
 
 def tfidf_score(resume: str, job: str) -> float:
-    """Phase 3 — TF-IDF cosine similarity."""
+    """Phase 3 — TF-IDF cosine similarity (manual, no sklearn)."""
     try:
-        vectorizer = TfidfVectorizer()
-        tfidf_matrix = vectorizer.fit_transform([resume, job])
-        similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])
-        return float(similarity[0][0])
+        vec1, vec2 = manual_tfidf_vectors(resume, job)
+        return cosine_sim(vec1, vec2)
     except Exception:
         logger.warning("TF-IDF computation failed, returning 0")
         return 0.0
@@ -188,8 +248,7 @@ async def embedding_score(resume: str, job: str) -> float:
     if embeddings and len(embeddings) == 2:
         emb1 = np.array(embeddings[0])
         emb2 = np.array(embeddings[1])
-        sim = cosine_similarity([emb1], [emb2])
-        return float(sim[0][0])
+        return cosine_sim(emb1, emb2)
 
     # Fallback: use TF-IDF score as approximation for semantic score
     logger.info("Using TF-IDF as fallback for semantic score")
