@@ -46,7 +46,7 @@ app.add_middleware(
 # Load the sentence-transformer model at startup (one-time cost)
 # ---------------------------------------------------------------------------
 logger.info("Loading SentenceTransformer model (all-MiniLM-L6-v2) …")
-model = SentenceTransformer("all-MiniLM-L6-v2")
+model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
 logger.info("Model loaded ✓")
 
 # ---------------------------------------------------------------------------
