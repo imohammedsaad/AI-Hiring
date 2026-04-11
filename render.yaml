@@ -4,9 +4,8 @@ services:
     env: python
     plan: free
 
-    runtime: python3.11.9
-
     buildCommand: "pip install --upgrade pip setuptools wheel && pip install -r requirements.txt"
+
     startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
 
     autoDeploy: true
