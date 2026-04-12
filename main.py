@@ -14,6 +14,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from fastapi import UploadFile, File, Form
+from fastapi import Body
+import base64
+import pdfplumber
+from io import BytesIO
 import pdfplumber
 import numpy as np
 import httpx
@@ -379,7 +383,7 @@ async def predict_file(data: dict = Body(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 # ---------------------------------------------------------------------------
 # Standalone run (python main.py)
 # ---------------------------------------------------------------------------
