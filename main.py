@@ -13,6 +13,8 @@ No PyTorch, no sentence-transformers, no scikit-learn.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from fastapi import UploadFile, File, Form
+import pdfplumber
 import numpy as np
 import httpx
 import os
