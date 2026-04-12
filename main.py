@@ -336,6 +336,55 @@ async def predict(data: InputData):
         logger.error(f"Prediction failed: {e}")
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
+@app.post("/predict_file", tags=["Matching"])
+async def predict_file(file: UploadFile = File(...), job: str = Form(...)):
+
+    start = time.perf_counter()
+
+    try:
+        text = ""
+
+        # Extract text from PDF
+        with pdfplumber.open(file.file) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+
+        # ---- USE YOUR EXISTING LOGIC ----
+        semantic = await embedding_score(text, job)
+        s_score, matched, missing = skill_analysis(text, job)
+        tfidf = tfidf_score(text, job)
+        kw = keyword_score(text, job)
+
+        final = 0.6 * semantic + 0.4 * s_score
+
+        if final > 0.75:
+            rec = "Strong Match ✅"
+        elif final > 0.50:
+            rec = "Moderate Match ⚠️"
+        else:
+            rec = "Low Match ❌"
+
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        return {
+            "final_score": round(final, 4),
+            "semantic_score": round(semantic, 4),
+            "tfidf_score": round(tfidf, 4),
+            "keyword_score": round(kw, 4),
+            "skill_score": round(s_score, 4),
+            "matched_skills": matched,
+            "missing_skills": missing,
+            "recommendation": rec,
+            "processing_time_ms": round(elapsed_ms, 2)
+        }
+
+    except Exception as e:
+        logger.error(f"File prediction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ---------------------------------------------------------------------------
 # Standalone run (python main.py)
