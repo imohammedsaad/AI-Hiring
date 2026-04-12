@@ -383,7 +383,60 @@ async def predict_file(data: dict = Body(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+from fastapi import Body
+import base64
+import pdfplumber
+from io import BytesIO
 
+@app.post("/parse_resume", tags=["Parsing"])
+async def parse_resume(data: dict = Body(...)):
+
+    try:
+        file_base64 = data.get("file")
+
+        if not file_base64:
+            raise HTTPException(status_code=400, detail="File not provided")
+
+        # Decode base64 → bytes
+        file_bytes = base64.b64decode(file_base64)
+        file_stream = BytesIO(file_bytes)
+
+        # ================================
+        # 📄 EXTRACT TEXT FROM PDF
+        # ================================
+        text = ""
+        with pdfplumber.open(file_stream) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Could not extract text")
+
+        # ================================
+        # 🧠 EXTRACT SKILLS
+        # ================================
+        extracted_skills = extract_skills(text)
+
+        # ================================
+        # 🧠 BASIC EXPERIENCE EXTRACTION
+        # ================================
+        experience = ""
+
+        import re
+        exp_match = re.findall(r'(\d+)\+?\s+years?', text.lower())
+        if exp_match:
+            experience = exp_match[0] + " years"
+
+        return {
+            "text": text[:10000],  # limit size (Salesforce safe)
+            "skills": extracted_skills,
+            "experience": experience
+        }
+
+    except Exception as e:
+        logger.error(f"Resume parsing failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+        
 # ---------------------------------------------------------------------------
 # Standalone run (python main.py)
 # ---------------------------------------------------------------------------
