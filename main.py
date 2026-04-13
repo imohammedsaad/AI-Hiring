@@ -459,31 +459,31 @@ async def predict(data: InputData):
         0.1 * pref_score
     )
     def experience_score(candidate_exp, required_exp):
-    if required_exp == 0:
-        return 1.0
-    if candidate_exp >= required_exp:
-        return 1.0
-    return candidate_exp / required_exp
+        if required_exp == 0:
+            return 1.0
+        if candidate_exp >= required_exp:
+            return 1.0
+        return candidate_exp / required_exp
 
-    exp_score = experience_score(candidate_experience, required_experience)
-    
-    return {
-    "final_score": round(final, 4),
-    "semantic_score": round(semantic, 4),
+        exp_score = experience_score(candidate_experience, required_experience)
+        
+        return {
+        "final_score": round(final, 4),
+        "semantic_score": round(semantic, 4),
 
-    # 🔥 IMPORTANT FIXES
-    "required_skill_score": round(skill, 4),   # from skill_score
-    "preferred_skill_score": round(keyword, 4), # using keyword as proxy
-    "experience_score": round(exp_score, 4),  # temporary (or compute if you want)
+        # 🔥 IMPORTANT FIXES
+        "required_skill_score": round(skill, 4),   # from skill_score
+        "preferred_skill_score": round(keyword, 4), # using keyword as proxy
+        "experience_score": round(exp_score, 4),  # temporary (or compute if you want)
 
-    # optional (keep if useful)
-    "tfidf_score": round(tfidf, 4),
+        # optional (keep if useful)
+        "tfidf_score": round(tfidf, 4),
 
-    "matched_skills": matched_skills,
-    "missing_skills": missing_skills,
+        "matched_skills": matched_skills,
+        "missing_skills": missing_skills,
 
-    "recommendation": recommendation
-    }
+        "recommendation": recommendation
+        }
 
 @app.post("/predict_file")
 async def predict_file(data: dict = Body(...)):
