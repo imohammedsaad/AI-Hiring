@@ -355,18 +355,35 @@ def estimate_experience(text):
 # ---------------------------
 # MAIN ENDPOINT
 # ---------------------------
+def extract_section(text, section_name):
+    pattern = rf"{section_name}(.+?)(\n[A-Z][a-z]+|\Z)"
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
 @app.post("/parse_resume")
 def parse_resume(req: ResumeRequest):
     file_bytes = base64.b64decode(req.file)
 
     text = extract_text(file_bytes)
+
+    # --- Existing ---
     skills = extract_skills(text)
     experience = estimate_experience(text)
+
+    # --- NEW: Section extraction ---
+    education = extract_section(text, "Education")
+    projects = extract_section(text, "Projects")
+    certifications = extract_section(text, "Certifications")
 
     return {
         "text": text[:5000],
         "skills": skills,
-        "experience": experience
+        "experience": experience,
+        "sections": {
+            "education": education,
+            "projects": projects,
+            "certifications": certifications
+        }
     }
 # ---------------------------------------------------------------------------
 # Endpoints
