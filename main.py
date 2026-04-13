@@ -27,6 +27,8 @@ import math
 import logging
 import time
 from collections import Counter
+import docx
+import spacy
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -280,7 +282,92 @@ def skill_analysis(resume: str, job: str) -> tuple[float, list[str], list[str]]:
 
     score = len(matched) / len(job_skills) if job_skills else 0.0
     return score, matched, missing
+class ResumeRequest(BaseModel):
+    file: str
 
+# ---------------------------
+# FILE PARSER
+# ---------------------------
+def extract_text(file_bytes):
+    try:
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            return "\n".join([p.extract_text() or "" for p in pdf.pages])
+    except:
+        try:
+            doc = docx.Document(BytesIO(file_bytes))
+            return "\n".join([p.text for p in doc.paragraphs])
+        except:
+            return ""
+
+# ---------------------------
+# EXPERIENCE ENGINE (REAL CORE)
+# ---------------------------
+def extract_explicit_experience(text):
+    matches = re.findall(r'(\d+)\s*(year|yr)', text.lower())
+    if matches:
+        return max([int(m[0]) for m in matches])
+    return None
+
+def extract_project_count(text):
+    return len(re.findall(r'project', text.lower()))
+
+def extract_education_year(text):
+    matches = re.findall(r'(20\d{2})\s*[-–]\s*(20\d{2})', text)
+    if matches:
+        return int(matches[0][1])
+    return None
+
+def estimate_experience(text):
+    explicit = extract_explicit_experience(text)
+
+    if explicit:
+        return {
+            "years": explicit,
+            "label": f"{explicit} years",
+            "confidence": 0.95
+        }
+
+    # Infer from projects
+    project_count = extract_project_count(text)
+
+    # Infer from education
+    grad_year = extract_education_year(text)
+
+    # crude inference
+    inferred_years = min(project_count * 0.3, 2)
+
+    if grad_year:
+        inferred_years += 0.5
+
+    if inferred_years < 1:
+        return {
+            "years": round(inferred_years, 2),
+            "label": "Fresher",
+            "confidence": 0.7
+        }
+    else:
+        return {
+            "years": round(inferred_years, 2),
+            "label": f"{round(inferred_years,1)} years (estimated)",
+            "confidence": 0.6
+        }
+
+# ---------------------------
+# MAIN ENDPOINT
+# ---------------------------
+@app.post("/parse_resume")
+def parse_resume(req: ResumeRequest):
+    file_bytes = base64.b64decode(req.file)
+
+    text = extract_text(file_bytes)
+    skills = extract_skills(text)
+    experience = estimate_experience(text)
+
+    return {
+        "text": text[:5000],
+        "skills": skills,
+        "experience": experience
+    }
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -383,60 +470,6 @@ async def predict_file(data: dict = Body(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-from fastapi import Body
-import base64
-import pdfplumber
-from io import BytesIO
-
-@app.post("/parse_resume", tags=["Parsing"])
-async def parse_resume(data: dict = Body(...)):
-
-    try:
-        file_base64 = data.get("file")
-
-        if not file_base64:
-            raise HTTPException(status_code=400, detail="File not provided")
-
-        # Decode base64 → bytes
-        file_bytes = base64.b64decode(file_base64)
-        file_stream = BytesIO(file_bytes)
-
-        # ================================
-        # 📄 EXTRACT TEXT FROM PDF
-        # ================================
-        text = ""
-        with pdfplumber.open(file_stream) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-
-        if not text.strip():
-            raise HTTPException(status_code=400, detail="Could not extract text")
-
-        # ================================
-        # 🧠 EXTRACT SKILLS
-        # ================================
-        extracted_skills = extract_skills(text)
-
-        # ================================
-        # 🧠 BASIC EXPERIENCE EXTRACTION
-        # ================================
-        experience = ""
-
-        import re
-        exp_match = re.findall(r'(\d+)\+?\s+years?', text.lower())
-        if exp_match:
-            experience = exp_match[0] + " years"
-
-        return {
-            "text": text[:10000],  # limit size (Salesforce safe)
-            "skills": extracted_skills,
-            "experience": experience
-        }
-
-    except Exception as e:
-        logger.error(f"Resume parsing failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-        
 # ---------------------------------------------------------------------------
 # Standalone run (python main.py)
 # ---------------------------------------------------------------------------
