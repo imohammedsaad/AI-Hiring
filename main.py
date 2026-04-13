@@ -208,9 +208,14 @@ SKILLS = [
 # ---------------------------------------------------------------------------
 
 class InputData(BaseModel):
-    resume: str = Field(..., min_length=1, description="Full resume text")
-    job: str = Field(..., min_length=1, description="Job description text")
+    resume: str
+    candidate_skills: list[str]
+    candidate_experience: float
 
+    job: str
+    required_skills: str
+    preferred_skills: str
+    required_experience: float
 
 class MatchResponse(BaseModel):
     final_score: float
@@ -226,6 +231,33 @@ class MatchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Scoring engines
 # ---------------------------------------------------------------------------
+def parse_skills(skill_text):
+    if not skill_text:
+        return []
+    return [s.strip().lower() for s in skill_text.split(',') if s.strip()]
+
+def required_skill_score(candidate_skills, required_skills):
+    if not required_skills:
+        return 0.0
+
+    matched = set(candidate_skills) & set(required_skills)
+    return len(matched) / len(required_skills), list(matched)
+
+def preferred_skill_score(candidate_skills, preferred_skills):
+    if not preferred_skills:
+        return 0.0
+
+    matched = set(candidate_skills) & set(preferred_skills)
+    return len(matched) / len(preferred_skills)
+
+def experience_score(candidate_exp, required_exp):
+    if not required_exp:
+        return 1.0
+
+    if candidate_exp >= required_exp:
+        return 1.0
+
+    return candidate_exp / required_exp
 
 def keyword_score(resume: str, job: str) -> float:
     """Phase 2 — simple word-overlap ratio."""
@@ -395,56 +427,63 @@ def home():
     return {"status": "ok", "message": "Resume-Job Matcher API is running 🚀"}
 
 
-@app.post("/predict", response_model=MatchResponse, tags=["Matching"])
+@app.post("/predict")
 async def predict(data: InputData):
-    """
-    Main matching endpoint.
 
-    Combines:
-    - Semantic similarity (60 % weight)
-    - Skill-gap matching (40 % weight)
+    # Semantic
+    semantic = await embedding_score(data.resume, data.job)
 
-    Also returns TF-IDF and keyword scores for reference.
-    """
-    start = time.perf_counter()
+    # Skills
+    req_skills = parse_skills(data.required_skills)
+    pref_skills = parse_skills(data.preferred_skills)
 
-    try:
-        # --- Core scores ---
-        semantic = await embedding_score(data.resume, data.job)
-        s_score, matched, missing = skill_analysis(data.resume, data.job)
+    req_score, matched = required_skill_score(
+        data.candidate_skills, req_skills
+    )
 
-        # --- Supplementary scores ---
-        tfidf = tfidf_score(data.resume, data.job)
-        kw = keyword_score(data.resume, data.job)
+    pref_score = preferred_skill_score(
+        data.candidate_skills, pref_skills
+    )
 
-        # --- Weighted final score ---
-        final = 0.6 * semantic + 0.4 * s_score
+    # Experience
+    exp_score = experience_score(
+        data.candidate_experience,
+        data.required_experience
+    )
 
-        # --- Recommendation ---
-        if final > 0.75:
-            rec = "Strong Match ✅"
-        elif final > 0.50:
-            rec = "Moderate Match ⚠️"
-        else:
-            rec = "Low Match ❌"
+    # Final score
+    final = (
+        0.4 * semantic +
+        0.3 * req_score +
+        0.2 * exp_score +
+        0.1 * pref_score
+    )
+    def experience_score(candidate_exp, required_exp):
+    if required_exp == 0:
+        return 1.0
+    if candidate_exp >= required_exp:
+        return 1.0
+    return candidate_exp / required_exp
 
-        elapsed_ms = (time.perf_counter() - start) * 1000
+    exp_score = experience_score(candidate_experience, required_experience)
+    
+    return {
+    "final_score": round(final, 4),
+    "semantic_score": round(semantic, 4),
 
-        return MatchResponse(
-            final_score=round(final, 4),
-            semantic_score=round(semantic, 4),
-            tfidf_score=round(tfidf, 4),
-            keyword_score=round(kw, 4),
-            skill_score=round(s_score, 4),
-            matched_skills=matched,
-            missing_skills=missing,
-            recommendation=rec,
-            processing_time_ms=round(elapsed_ms, 2),
-        )
+    # 🔥 IMPORTANT FIXES
+    "required_skill_score": round(skill, 4),   # from skill_score
+    "preferred_skill_score": round(keyword, 4), # using keyword as proxy
+    "experience_score": round(exp_score, 4),  # temporary (or compute if you want)
 
-    except Exception as e:
-        logger.error(f"Prediction failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+    # optional (keep if useful)
+    "tfidf_score": round(tfidf, 4),
+
+    "matched_skills": matched_skills,
+    "missing_skills": missing_skills,
+
+    "recommendation": recommendation
+    }
 
 @app.post("/predict_file")
 async def predict_file(data: dict = Body(...)):
