@@ -212,9 +212,8 @@ SKILLS = [
 
 class InputData(BaseModel):
     resume: str
-    candidate_skills: list[str]
+    candidate_skills: Union[str, List[str]]
     candidate_experience: float
-
     job: str
     required_skills: Union[str, List[str]]
     preferred_skills: Union[str, List[str]]
@@ -476,6 +475,7 @@ def home():
 @app.post("/predict")
 async def predict(data: InputData):
 
+    candidate_skills = normalize_to_list(data.candidate_skills)
     # Semantic
     semantic = await embedding_score(data.resume, data.job)
 
@@ -484,11 +484,11 @@ async def predict(data: InputData):
     pref_skills = normalize_to_list(data.preferred_skills)
    
     req_score, matched = required_skill_score(
-        data.candidate_skills, req_skills
+        candidate_skills, req_skills
     )
 
     pref_score = preferred_skill_score(
-        data.candidate_skills, pref_skills
+        candidate_skills, pref_skills
     )
 
     # Experience
