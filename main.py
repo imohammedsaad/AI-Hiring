@@ -397,37 +397,58 @@ def estimate_experience(text):
 
 async def generate_explanation(resume, job, matched, missing, score):
     prompt = f"""
-    Candidate Resume: {resume[:300]}
-    Job Description: {job[:300]}
+    Candidate resume: {resume[:200]}
+    Job: {job[:200]}
 
-    Matched Skills: {matched}
-    Missing Skills: {missing}
+    Matched skills: {matched}
+    Missing skills: {missing}
     Score: {score}
 
-    Explain why this candidate is a good or bad fit in 2-3 lines.
+    Give a short explanation (2 lines).
     """
 
-    headers = {}
+    headers = {"Content-Type": "application/json"}
     if HF_API_TOKEN:
         headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
 
     try:
         resp = await http_client.post(
             HF_EXPLAIN_URL,
-            json={"inputs": prompt},
-            headers=headers
+            json={
+                "inputs": prompt,
+                "options": {"wait_for_model": True}
+            },
+            headers=headers,
+            timeout=20.0
         )
-        resp.raise_for_status()
-        output = resp.json()
 
-        if isinstance(output, list):
-            return output[0].get("generated_text", "No explanation available")
+        result = resp.json()
 
-        return "No explanation available"
+        # 🔥 Handle multiple formats safely
+        if isinstance(result, list) and len(result) > 0:
+            return result[0].get("generated_text", "").strip()
+
+        if isinstance(result, dict) and "generated_text" in result:
+            return result["generated_text"].strip()
+
+        if isinstance(result, dict) and "error" in result:
+            logger.warning(f"HF Error: {result['error']}")
+            return fallback_explanation(matched, missing, score)
+
+        return fallback_explanation(matched, missing, score)
 
     except Exception as e:
         logger.warning(f"Explanation failed: {e}")
-        return "Explanation unavailable"
+        return fallback_explanation(matched, missing, score)
+
+def fallback_explanation(matched, missing, score):
+    if score > 0.75:
+        return f"Strong fit. Matches key skills: {', '.join(matched)}."
+
+    if score > 0.5:
+        return f"Moderate fit. Has {', '.join(matched)} but lacks {', '.join(missing[:3])}."
+
+    return f"Weak fit. Missing important skills like {', '.join(missing[:3])}."
 
 # ---------------------------
 # MAIN ENDPOINT
