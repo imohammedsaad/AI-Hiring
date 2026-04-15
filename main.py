@@ -28,7 +28,7 @@ import logging
 import time
 from collections import Counter
 import docx
-import spacy
+from typing import Union, List
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -60,7 +60,10 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}"
+
+HF_EXPLAIN_MODEL = "google/flan-t5-small"
+HF_EXPLAIN_URL = f"https://router.huggingface.co/hf-inference/models/{HF_EXPLAIN_MODEL}"
 
 # Reusable async HTTP client — created once, reused across requests
 http_client: httpx.AsyncClient | None = None
@@ -151,14 +154,14 @@ async def get_embeddings(texts: list[str]) -> list[list[float]]:
     Get sentence embeddings from HuggingFace Inference API (free tier).
     Falls back to TF-IDF if the API is unavailable.
     """
-    headers = {}
+    headers = {"Content-Type": "application/json"}
     if HF_API_TOKEN:
-        headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
-
+            headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
+    
     payload = {
-        "inputs": texts,
-        "options": {"wait_for_model": True},
-    }
+                "inputs": texts,
+                "options": {"wait_for_model": True},
+            }
 
     try:
         resp = await http_client.post(HF_API_URL, json=payload, headers=headers)
@@ -213,8 +216,8 @@ class InputData(BaseModel):
     candidate_experience: float
 
     job: str
-    required_skills: str
-    preferred_skills: str
+    required_skills: Union[str, List[str]]
+    preferred_skills: Union[str, List[str]]
     required_experience: float
 
 class MatchResponse(BaseModel):
@@ -297,6 +300,15 @@ async def embedding_score(resume: str, job: str) -> float:
 # ---------------------------------------------------------------------------
 # Skill extraction & analysis
 # ---------------------------------------------------------------------------
+
+def normalize_to_list(skills):
+    if not skills:
+        return []
+    
+    if isinstance(skills, list):
+        return [s.strip().lower() for s in skills if s]
+    
+    return [s.strip().lower() for s in skills.split(',') if s.strip()]
 
 def extract_skills(text: str) -> list[str]:
     """Phase 5 — find known skills in text."""
@@ -384,6 +396,40 @@ def estimate_experience(text):
             "confidence": 0.6
         }
 
+async def generate_explanation(resume, job, matched, missing, score):
+    prompt = f"""
+    Candidate Resume: {resume[:300]}
+    Job Description: {job[:300]}
+
+    Matched Skills: {matched}
+    Missing Skills: {missing}
+    Score: {score}
+
+    Explain why this candidate is a good or bad fit in 2-3 lines.
+    """
+
+    headers = {}
+    if HF_API_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_API_TOKEN}"
+
+    try:
+        resp = await http_client.post(
+            HF_EXPLAIN_URL,
+            json={"inputs": prompt},
+            headers=headers
+        )
+        resp.raise_for_status()
+        output = resp.json()
+
+        if isinstance(output, list):
+            return output[0].get("generated_text", "No explanation available")
+
+        return "No explanation available"
+
+    except Exception as e:
+        logger.warning(f"Explanation failed: {e}")
+        return "Explanation unavailable"
+
 # ---------------------------
 # MAIN ENDPOINT
 # ---------------------------
@@ -434,9 +480,9 @@ async def predict(data: InputData):
     semantic = await embedding_score(data.resume, data.job)
 
     # Skills
-    req_skills = parse_skills(data.required_skills)
-    pref_skills = parse_skills(data.preferred_skills)
-
+    req_skills = normalize_to_list(data.required_skills)
+    pref_skills = normalize_to_list(data.preferred_skills)
+   
     req_score, matched = required_skill_score(
         data.candidate_skills, req_skills
     )
@@ -458,32 +504,33 @@ async def predict(data: InputData):
         0.2 * exp_score +
         0.1 * pref_score
     )
-    def experience_score(candidate_exp, required_exp):
-        if required_exp == 0:
-            return 1.0
-        if candidate_exp >= required_exp:
-            return 1.0
-        return candidate_exp / required_exp
+    # 🔥 Generate missing skills (better explanation)
+    missing_skills = list(set(req_skills) - set(matched))
 
-        exp_score = experience_score(candidate_experience, required_experience)
-        
-        return {
+    # 🔥 Generate explanation
+    explanation = await generate_explanation(
+        data.resume,
+        data.job,
+        matched,
+        missing_skills,
+        final
+    )
+
+    # 🔥 Final response
+    return {
         "final_score": round(final, 4),
         "semantic_score": round(semantic, 4),
-
-        # 🔥 IMPORTANT FIXES
-        "required_skill_score": round(skill, 4),   # from skill_score
-        "preferred_skill_score": round(keyword, 4), # using keyword as proxy
-        "experience_score": round(exp_score, 4),  # temporary (or compute if you want)
-
-        # optional (keep if useful)
-        "tfidf_score": round(tfidf, 4),
-
-        "matched_skills": matched_skills,
-        "missing_skills": missing_skills,
-
-        "recommendation": recommendation
-        }
+        "required_skill_score": round(req_score, 4),
+        "preferred_skill_score": round(pref_score, 4),
+        "experience_score": round(exp_score, 4),
+        "matched_skills": matched,
+        "recommendation": (
+            "Strong Match" if final > 0.75 else
+            "Moderate Match" if final > 0.5 else
+            "Low Match"
+        ),
+        "explanation": explanation
+    }
 
 @app.post("/predict_file")
 async def predict_file(data: dict = Body(...)):
