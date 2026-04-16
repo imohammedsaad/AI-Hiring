@@ -29,6 +29,7 @@ import time
 from collections import Counter
 import docx
 from typing import Union, List
+import random
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -206,6 +207,31 @@ SKILLS = [
     "communication", "leadership", "problem solving",
 ]
 
+SKILL_SYNONYMS = {
+    # AI/ML
+    "ml": "machine learning",
+    "machine learning": "machine learning",
+
+    # Cloud
+    "aws services": "aws",
+    "cloud": "aws",
+    "cloud architecture": "aws",
+    "amazon web services": "aws",
+
+    # DevOps
+    "devops": "devops",
+    "infrastructure": "devops",
+
+    # Variants
+    "fast api": "fastapi",
+    "nodejs": "node.js",
+    "reactjs": "react",
+
+    # Data
+    "hadoop": "big data",
+    "emr": "aws"
+}
+
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
@@ -233,23 +259,54 @@ class MatchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Scoring engines
 # ---------------------------------------------------------------------------
+
+def compute_final_score(semantic, skill_score, exp_score=0.0, pref_score=0.0):
+    return (
+        0.4 * semantic +
+        0.3 * skill_score +
+        0.2 * exp_score +
+        0.1 * pref_score
+    )
+
 def parse_skills(skill_text):
     if not skill_text:
         return []
     return [s.strip().lower() for s in skill_text.split(',') if s.strip()]
 
+def smart_match(candidate_skills, required_skills):
+    matched = []
+
+    for r in required_skills:
+        for c in candidate_skills:
+
+            # exact match
+            if r == c:
+                matched.append(r)
+                break
+
+            # word-level match (safe)
+            r_words = set(r.split())
+            c_words = set(c.split())
+
+            if r_words & c_words:
+                matched.append(r)
+                break
+
+    return list(set(matched))
+
 def required_skill_score(candidate_skills, required_skills):
     if not required_skills:
-        return 0.0
+        return 0.0, []
 
-    matched = set(candidate_skills) & set(required_skills)
-    return len(matched) / len(required_skills), list(matched)
+    matched = smart_match(candidate_skills, required_skills)
+
+    return len(matched) / len(required_skills), matched
 
 def preferred_skill_score(candidate_skills, preferred_skills):
     if not preferred_skills:
         return 0.0
 
-    matched = set(candidate_skills) & set(preferred_skills)
+    matched = smart_match(candidate_skills, preferred_skills)
     return len(matched) / len(preferred_skills)
 
 def experience_score(candidate_exp, required_exp):
@@ -261,17 +318,18 @@ def experience_score(candidate_exp, required_exp):
 
     return candidate_exp / required_exp
 
+STOPWORDS = {
+    "the","and","a","to","of","in","for","on","with","as","by","an"
+}
+
 def keyword_score(resume: str, job: str) -> float:
-    """Phase 2 — simple word-overlap ratio."""
-    resume_words = set(resume.lower().split())
-    job_words = set(job.lower().split())
+    resume_words = set(tokenize(resume)) - STOPWORDS
+    job_words = set(tokenize(job)) - STOPWORDS
 
     if not job_words:
         return 0.0
 
-    matched = resume_words & job_words
-    return len(matched) / len(job_words)
-
+    return len(resume_words & job_words) / len(job_words)
 
 def tfidf_score(resume: str, job: str) -> float:
     """Phase 3 — TF-IDF cosine similarity (manual, no sklearn)."""
@@ -303,11 +361,24 @@ async def embedding_score(resume: str, job: str) -> float:
 def normalize_to_list(skills):
     if not skills:
         return []
-    
+
     if isinstance(skills, list):
-        return [s.strip().lower() for s in skills if s]
-    
-    return [s.strip().lower() for s in skills.split(',') if s.strip()]
+        raw = skills
+    else:
+        raw = skills.split(',')
+
+    normalized = []
+
+    for s in raw:
+        clean = s.strip().lower()
+
+        # 🔥 synonym mapping
+        if clean in SKILL_SYNONYMS:
+            clean = SKILL_SYNONYMS[clean]
+
+        normalized.append(clean)
+
+    return list(set(normalized))
 
 def extract_skills(text: str) -> list[str]:
     """Phase 5 — find known skills in text."""
@@ -370,30 +441,19 @@ def estimate_experience(text):
             "confidence": 0.95
         }
 
-    # Infer from projects
-    project_count = extract_project_count(text)
+    # fallback: detect seniority keywords
+    text_lower = text.lower()
 
-    # Infer from education
-    grad_year = extract_education_year(text)
+    if "intern" in text_lower:
+        return {"years": 0.5, "label": "Intern level", "confidence": 0.7}
 
-    # crude inference
-    inferred_years = min(project_count * 0.3, 2)
+    if "junior" in text_lower:
+        return {"years": 1.0, "label": "Junior", "confidence": 0.7}
 
-    if grad_year:
-        inferred_years += 0.5
+    if "senior" in text_lower:
+        return {"years": 4.0, "label": "Senior", "confidence": 0.7}
 
-    if inferred_years < 1:
-        return {
-            "years": round(inferred_years, 2),
-            "label": "Fresher",
-            "confidence": 0.7
-        }
-    else:
-        return {
-            "years": round(inferred_years, 2),
-            "label": f"{round(inferred_years,1)} years (estimated)",
-            "confidence": 0.6
-        }
+    return {"years": 0.5, "label": "Fresher", "confidence": 0.6}
 
 async def generate_explanation(resume, job, matched, missing, score):
     prompt = f"""
@@ -442,21 +502,29 @@ async def generate_explanation(resume, job, matched, missing, score):
         return fallback_explanation(matched, missing, score)
 
 def fallback_explanation(matched, missing, score):
+    matched_str = ', '.join(matched) if matched else "limited relevant skills"
+    missing_str = ', '.join(missing[:3]) if missing else "no major gaps"
+
+    templates = [
+        f"Candidate aligns with {matched_str}, but lacks {missing_str}.",
+        f"Profile shows strength in {matched_str}, though gaps exist in {missing_str}.",
+        f"Skills like {matched_str} are present; improvement needed in {missing_str}.",
+    ]
+
     if score > 0.75:
-        return f"Strong fit. Matches key skills: {', '.join(matched)}."
+        return f"Strong alignment. Candidate demonstrates solid expertise in {matched_str}."
 
     if score > 0.5:
-        return f"Moderate fit. Has {', '.join(matched)} but lacks {', '.join(missing[:3])}."
+        return random.choice(templates)
 
-    return f"Weak fit. Missing important skills like {', '.join(missing[:3])}."
-
+    return f"Insufficient match. Missing key areas such as {missing_str}."
 # ---------------------------
 # MAIN ENDPOINT
 # ---------------------------
 def extract_section(text, section_name):
-    pattern = rf"{section_name}(.+?)(\n[A-Z][a-z]+|\Z)"
-    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-    return match.group(1).strip() if match else ""
+    pattern = rf"{section_name}[\s\S]*?(?=\n[A-Z ]{{3,}}|\Z)"
+    match = re.search(pattern, text, re.IGNORECASE)
+    return match.group(0).strip() if match else ""
 
 @app.post("/parse_resume")
 def parse_resume(req: ResumeRequest):
@@ -496,7 +564,11 @@ def home():
 @app.post("/predict")
 async def predict(data: InputData):
 
-    candidate_skills = normalize_to_list(data.candidate_skills)
+    extracted = normalize_to_list(extract_skills(data.resume))
+
+    candidate_skills = list(set(
+        normalize_to_list(data.candidate_skills) + extracted
+    ))
     # Semantic
     semantic = await embedding_score(data.resume, data.job)
 
@@ -519,12 +591,8 @@ async def predict(data: InputData):
     )
 
     # Final score
-    final = (
-        0.4 * semantic +
-        0.3 * req_score +
-        0.2 * exp_score +
-        0.1 * pref_score
-    )
+    final = compute_final_score(semantic, req_score, exp_score, pref_score)
+
     # 🔥 Generate missing skills (better explanation)
     missing_skills = list(set(req_skills) - set(matched))
 
@@ -570,12 +638,15 @@ async def predict_file(data: dict = Body(...)):
 
         # ---- YOUR EXISTING LOGIC ----
         semantic = await embedding_score(text, job)
-        s_score, matched, missing = skill_analysis(text, job)
+        candidate_skills = normalize_to_list(extract_skills(text))
+        req_skills = normalize_to_list(extract_skills(job))
+
+        s_score, matched = required_skill_score(candidate_skills, req_skills)
+        missing = list(set(req_skills) - set(matched))
         tfidf = tfidf_score(text, job)
         kw = keyword_score(text, job)
 
-        final = 0.6 * semantic + 0.4 * s_score
-
+        final = compute_final_score(semantic, s_score)
         if final > 0.75:
             rec = "Strong Match ✅"
         elif final > 0.50:
